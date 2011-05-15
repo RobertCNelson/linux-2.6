@@ -54,6 +54,104 @@
 #include "pm.h"
 #include "omap3-opp.h"
 
+/*
+ * OMAP3 Beagle revision
+ * Run time detection of Beagle revision is done by reading GPIO.
+ * GPIO ID -
+ *	AXBX	= GPIO173, GPIO172, GPIO171: 1 1 1
+ *	C1_3	= GPIO173, GPIO172, GPIO171: 1 1 0
+ *	C4	= GPIO173, GPIO172, GPIO171: 1 0 1
+ *	XMA	= GPIO173, GPIO172, GPIO171: 0 0 0
+ *	XMB	= GPIO173, GPIO172, GPIO171: 0 0 1
+ *	XMC	= GPIO173, GPIO172, GPIO171: 0 1 0
+ */
+enum {
+	OMAP3BEAGLE_BOARD_UNKN = 0,
+	OMAP3BEAGLE_BOARD_AXBX,
+	OMAP3BEAGLE_BOARD_C1_3,
+	OMAP3BEAGLE_BOARD_C4,
+	OMAP3BEAGLE_BOARD_XM,
+	OMAP3BEAGLE_BOARD_XMC,
+};
+
+static u8 omap3_beagle_version;
+
+static u8 omap3_beagle_get_rev(void)
+{
+	return omap3_beagle_version;
+}
+
+static void __init omap3_beagle_init_rev(void)
+{
+	int ret;
+	u16 beagle_rev = 0;
+
+	omap_mux_init_gpio(171, OMAP_PIN_INPUT_PULLUP);
+	omap_mux_init_gpio(172, OMAP_PIN_INPUT_PULLUP);
+	omap_mux_init_gpio(173, OMAP_PIN_INPUT_PULLUP);
+
+	ret = gpio_request(171, "rev_id_0");
+	if (ret < 0)
+		goto fail0;
+
+	ret = gpio_request(172, "rev_id_1");
+	if (ret < 0)
+		goto fail1;
+
+	ret = gpio_request(173, "rev_id_2");
+	if (ret < 0)
+		goto fail2;
+
+	gpio_direction_input(171);
+	gpio_direction_input(172);
+	gpio_direction_input(173);
+
+	beagle_rev = gpio_get_value(171) | (gpio_get_value(172) << 1)
+			| (gpio_get_value(173) << 2);
+
+	switch (beagle_rev) {
+	case 7:
+		pr_info("OMAP3 Beagle Rev: Ax/Bx\n");
+		omap3_beagle_version = OMAP3BEAGLE_BOARD_AXBX;
+		break;
+	case 6:
+		pr_info("OMAP3 Beagle Rev: C1/C2/C3\n");
+		omap3_beagle_version = OMAP3BEAGLE_BOARD_C1_3;
+		break;
+	case 5:
+		pr_info("OMAP3 Beagle Rev: C4\n");
+		omap3_beagle_version = OMAP3BEAGLE_BOARD_C4;
+		break;
+	case 0:
+		pr_info("OMAP3 Beagle Rev: xM A\n");
+		omap3_beagle_version = OMAP3BEAGLE_BOARD_XM;
+		break;
+	case 1:
+		pr_info("OMAP3 Beagle Rev: xM B\n");
+		omap3_beagle_version = OMAP3BEAGLE_BOARD_XM;
+		break;
+	case 2:
+		pr_info("OMAP3 Beagle Rev: xM C\n");
+		omap3_beagle_version = OMAP3BEAGLE_BOARD_XMC;
+		break;
+	default:
+		pr_info("OMAP3 Beagle Rev: unknown %hd, assuming xM C or newer\n", beagle_rev);
+		omap3_beagle_version = OMAP3BEAGLE_BOARD_XMC;
+	}
+
+	return;
+
+fail2:
+	gpio_free(172);
+fail1:
+	gpio_free(171);
+fail0:
+	pr_err("Unable to get revision detection GPIO pins\n");
+	omap3_beagle_version = OMAP3BEAGLE_BOARD_UNKN;
+
+	return;
+}
+
 #ifdef CONFIG_PM
 static struct omap_opp * _omap35x_mpu_rate_table        = omap35x_mpu_rate_table;
 static struct omap_opp * _omap37x_mpu_rate_table        = omap37x_mpu_rate_table;
@@ -410,14 +508,15 @@ static struct gpio_led gpio_leds[];
 static int beagle_twl_gpio_setup(struct device *dev,
 		unsigned gpio, unsigned ngpio)
 {
-	if (system_rev >= 0x20 && system_rev <= 0x34301000) {
-		if (cpu_is_omap3630()) {
-			mmc[0].gpio_wp = -1;
-		}
-		else {
-			mmc[0].gpio_wp = 23;
-			omap_mux_init_gpio(23, OMAP_PIN_INPUT);
-		}
+	int r;
+
+	if ((omap3_beagle_get_rev() == OMAP3BEAGLE_BOARD_XM) ||
+		(omap3_beagle_get_rev() == OMAP3BEAGLE_BOARD_XMC)) {
+		mmc[0].gpio_wp = -EINVAL;
+	} else if ((omap3_beagle_get_rev() == OMAP3BEAGLE_BOARD_C1_3) ||
+		(omap3_beagle_get_rev() == OMAP3BEAGLE_BOARD_C4)) {
+		omap_mux_init_gpio(23, OMAP_PIN_INPUT);
+		mmc[0].gpio_wp = 23;
 	} else {
 		mmc[0].gpio_wp = 29;
 		omap_mux_init_gpio(29, OMAP_PIN_INPUT);
@@ -433,32 +532,65 @@ static int beagle_twl_gpio_setup(struct device *dev,
 	/* REVISIT: need ehci-omap hooks for external VBUS
 	 * power switch and overcurrent detect
 	 */
+	if ((omap3_beagle_get_rev() != OMAP3BEAGLE_BOARD_XM) &&
+		(omap3_beagle_get_rev() != OMAP3BEAGLE_BOARD_XMC)) {
+		r = gpio_request(gpio + 1, "EHCI_nOC");
+		if (!r) {
+			r = gpio_direction_input(gpio + 1);
+			if (r)
+				gpio_free(gpio + 1);
+		}
+		if (r)
+			pr_err("%s: unable to configure EHCI_nOC\n", __func__);
+	}
 
-	if (cpu_is_omap3630()) {
-		/* Power on DVI, Serial and PWR led */
-		gpio_request(gpio + 1, "nDVI_PWR_EN");
-		gpio_direction_output(gpio + 1, 0);
-
-		/* Power on camera interface */
-		gpio_request(gpio + 2, "CAM_EN");
-		gpio_direction_output(gpio + 2, 1);
-
-		/* TWL4030_GPIO_MAX + 0 == ledA, EHCI nEN_USB_PWR (out, active low) */
-		gpio_request(gpio + TWL4030_GPIO_MAX, "nEN_USB_PWR");
+	/*
+	 * TWL4030_GPIO_MAX + 0 == ledA, EHCI nEN_USB_PWR (out, XM active
+	 * high / others active low)
+	 */
+	gpio_request(gpio + TWL4030_GPIO_MAX, "nEN_USB_PWR");
+	if (omap3_beagle_get_rev() == OMAP3BEAGLE_BOARD_XM)
 		gpio_direction_output(gpio + TWL4030_GPIO_MAX, 1);
-	}
-	else {
-		gpio_request(gpio + 1, "EHCI_nOC");
-		gpio_direction_input(gpio + 1);
-
-		/* TWL4030_GPIO_MAX + 0 == ledA, EHCI nEN_USB_PWR (out, active low) */
-		gpio_request(gpio + TWL4030_GPIO_MAX, "nEN_USB_PWR");
+	else
 		gpio_direction_output(gpio + TWL4030_GPIO_MAX, 0);
-	}
 
+	/* DVI reset GPIO is different between beagle revisions */
+	if ((omap3_beagle_get_rev() == OMAP3BEAGLE_BOARD_XM) ||
+		(omap3_beagle_get_rev() == OMAP3BEAGLE_BOARD_XMC))
+		beagle_dvi_device.reset_gpio = 129;
+	else
+		beagle_dvi_device.reset_gpio = 170;
 
 	/* TWL4030_GPIO_MAX + 1 == ledB, PMU_STAT (out, active low LED) */
 	gpio_leds[2].gpio = gpio + TWL4030_GPIO_MAX + 1;
+
+	/*
+	 * gpio + 1 on Xm controls the TFP410's enable line (active low)
+	 * gpio + 2 control varies depending on the board rev as follows:
+	 * P7/P8 revisions(prototype): Camera EN
+	 * A2+ revisions (production): LDO (supplies DVI, serial, led blocks)
+	 */
+	if ((omap3_beagle_get_rev() == OMAP3BEAGLE_BOARD_XM) ||
+		(omap3_beagle_get_rev() == OMAP3BEAGLE_BOARD_XMC)) {
+		r = gpio_request(gpio + 1, "nDVI_PWR_EN");
+		if (!r) {
+			r = gpio_direction_output(gpio + 1, 0);
+			if (r)
+				gpio_free(gpio + 1);
+		}
+		if (r)
+			pr_err("%s: unable to configure nDVI_PWR_EN\n",
+				__func__);
+		r = gpio_request(gpio + 2, "DVI_LDO_EN");
+		if (!r) {
+			r = gpio_direction_output(gpio + 2, 1);
+			if (r)
+				gpio_free(gpio + 2);
+		}
+		if (r)
+			pr_err("%s: unable to configure DVI_LDO_EN\n",
+				__func__);
+	}
 
 	return 0;
 }
@@ -874,7 +1006,15 @@ static int __init expansionboard_setup(char *str)
 static void __init omap3_beagle_init(void)
 {
 	omap3_mux_init(board_mux, OMAP_PACKAGE_CBB);
+	omap3_beagle_init_rev();
 	omap3_beagle_i2c_init();
+
+	/* xM version uses pin 4 instead of 7 for user button */
+	if ((omap3_beagle_get_rev() == OMAP3BEAGLE_BOARD_XM) ||
+		(omap3_beagle_get_rev() == OMAP3BEAGLE_BOARD_XMC)){
+		gpio_buttons[0].gpio = 4;
+	}
+
 	platform_add_devices(omap3_beagle_devices,
 			ARRAY_SIZE(omap3_beagle_devices));
 	omap_serial_init();
