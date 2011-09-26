@@ -176,6 +176,12 @@ static void omap3evm_android_gadget_init(void)
 #endif
 static u8 omap3_evm_version;
 
+extern void omap_pm_sys_offmode_select(int);
+extern void omap_pm_sys_offmode_pol(int);
+extern void omap_pm_sys_clkreq_pol(int);
+extern void omap_pm_auto_off(int);
+extern void omap_pm_auto_ret(int);
+
 u8 get_omap3_evm_rev(void)
 {
 	return omap3_evm_version;
@@ -801,6 +807,108 @@ static struct twl4030_gpio_platform_data omap3evm_gpio_data = {
 static struct twl4030_usb_data omap3evm_usb_data = {
 	.usb_mode	= T2_USB_MODE_ULPI,
 };
+/**
+ * Macro to configure resources
+ */
+#define TWL4030_RESCONFIG(res,grp,typ1,typ2,state)	\
+	{						\
+		.resource	= res,			\
+		.devgroup	= grp,			\
+		.type		= typ1,			\
+		.type2		= typ2,			\
+		.remap_sleep	= state			\
+	}
+
+static struct twl4030_resconfig  __initdata board_twl4030_rconfig[] = {
+	TWL4030_RESCONFIG(RES_VPLL1, DEV_GRP_P1, 3, 1, RES_STATE_OFF),		/* ? */
+	TWL4030_RESCONFIG(RES_VINTANA1, DEV_GRP_ALL, 1, 2, RES_STATE_SLEEP),
+	TWL4030_RESCONFIG(RES_VINTANA2, DEV_GRP_ALL, 0, 2, RES_STATE_SLEEP),
+	TWL4030_RESCONFIG(RES_VINTDIG, DEV_GRP_ALL, 1, 2, RES_STATE_SLEEP),
+	TWL4030_RESCONFIG(RES_VIO, DEV_GRP_ALL, 2, 2, RES_STATE_SLEEP),
+	TWL4030_RESCONFIG(RES_VDD1, DEV_GRP_P1, 4, 1, RES_STATE_OFF),		/* ? */
+	TWL4030_RESCONFIG(RES_VDD2, DEV_GRP_P1, 3, 1, RES_STATE_OFF),		/* ? */
+	TWL4030_RESCONFIG(RES_REGEN, DEV_GRP_ALL, 2, 1, RES_STATE_SLEEP),
+	TWL4030_RESCONFIG(RES_NRES_PWRON, DEV_GRP_ALL, 0, 1, RES_STATE_SLEEP),
+	TWL4030_RESCONFIG(RES_CLKEN, DEV_GRP_ALL, 3, 2, RES_STATE_SLEEP),
+	TWL4030_RESCONFIG(RES_SYSEN, DEV_GRP_ALL, 6, 1, RES_STATE_SLEEP),
+	TWL4030_RESCONFIG(RES_HFCLKOUT, DEV_GRP_P3, 0, 2, RES_STATE_SLEEP),	/* ? */
+	TWL4030_RESCONFIG(0, 0, 0, 0, 0),
+};
+
+/**
+ * Optimized 'Active to Sleep' sequence
+ */
+static struct twl4030_ins omap3evm_sleep_seq[] __initdata = {
+	{ MSG_SINGULAR(DEV_GRP_NULL, RES_HFCLKOUT, RES_STATE_SLEEP), 20},
+	{ MSG_BROADCAST(DEV_GRP_NULL, RES_GRP_ALL, RES_TYPE_R0, RES_TYPE2_R1, RES_STATE_SLEEP), 2 },
+	{ MSG_BROADCAST(DEV_GRP_NULL, RES_GRP_ALL, RES_TYPE_R0, RES_TYPE2_R2, RES_STATE_SLEEP), 2 },
+};
+
+static struct twl4030_script omap3evm_sleep_script __initdata = {
+	.script	= omap3evm_sleep_seq,
+	.size	= ARRAY_SIZE(omap3evm_sleep_seq),
+	.flags	= TWL4030_SLEEP_SCRIPT,
+};
+
+/**
+ * Optimized 'Sleep to Active (P12)' sequence
+ */
+static struct twl4030_ins omap3evm_wake_p12_seq[] __initdata = {
+	{ MSG_BROADCAST(DEV_GRP_NULL, RES_GRP_ALL, RES_TYPE_R0, RES_TYPE2_R1, RES_STATE_ACTIVE), 2 }
+};
+
+static struct twl4030_script omap3evm_wake_p12_script __initdata = {
+	.script = omap3evm_wake_p12_seq,
+	.size   = ARRAY_SIZE(omap3evm_wake_p12_seq),
+	.flags  = TWL4030_WAKEUP12_SCRIPT,
+};
+
+/**
+ * Optimized 'Sleep to Active' (P3) sequence
+ */
+static struct twl4030_ins omap3evm_wake_p3_seq[] __initdata = {
+	{ MSG_BROADCAST(DEV_GRP_NULL, RES_GRP_ALL, RES_TYPE_R0, RES_TYPE2_R2, RES_STATE_ACTIVE), 2 }
+};
+
+static struct twl4030_script omap3evm_wake_p3_script __initdata = {
+	.script = omap3evm_wake_p3_seq,
+	.size   = ARRAY_SIZE(omap3evm_wake_p3_seq),
+	.flags  = TWL4030_WAKEUP3_SCRIPT,
+};
+
+/**
+ * Optimized warm reset sequence (for less power surge)
+ */
+static struct twl4030_ins omap3evm_wrst_seq[] __initdata = {
+	{ MSG_SINGULAR(DEV_GRP_NULL, RES_RESET, RES_STATE_OFF), 0x2 },
+	{ MSG_SINGULAR(DEV_GRP_NULL, RES_MAIN_REF, RES_STATE_WRST), 2 },
+	{ MSG_BROADCAST(DEV_GRP_NULL, RES_GRP_ALL, RES_TYPE_R0, RES_TYPE2_R2, RES_STATE_WRST), 0x2},
+	{ MSG_SINGULAR(DEV_GRP_NULL, RES_VUSB_3V1, RES_STATE_WRST), 0x2 },
+	{ MSG_SINGULAR(DEV_GRP_NULL, RES_VPLL1, RES_STATE_WRST), 0x2 },
+	{ MSG_SINGULAR(DEV_GRP_NULL, RES_VDD2, RES_STATE_WRST), 0x7 },
+	{ MSG_SINGULAR(DEV_GRP_NULL, RES_VDD1, RES_STATE_WRST), 0x25 },
+	{ MSG_BROADCAST(DEV_GRP_NULL, RES_GRP_RC, RES_TYPE_ALL, RES_TYPE2_R0, RES_STATE_WRST), 0x2 },
+	{ MSG_SINGULAR(DEV_GRP_NULL, RES_RESET, RES_STATE_ACTIVE), 0x2 },
+};
+
+static struct twl4030_script omap3evm_wrst_script __initdata = {
+	.script = omap3evm_wrst_seq,
+	.size   = ARRAY_SIZE(omap3evm_wrst_seq),
+	.flags  = TWL4030_WRST_SCRIPT,
+};
+
+static struct twl4030_script __initdata *board_twl4030_scripts[] = {
+	&omap3evm_wake_p12_script,
+	&omap3evm_wake_p3_script,
+	&omap3evm_sleep_script,
+	&omap3evm_wrst_script
+};
+
+static struct twl4030_power_data __initdata omap3evm_script_data = {
+	.scripts		= board_twl4030_scripts,
+	.num			= ARRAY_SIZE(board_twl4030_scripts),
+	.resource_config	= board_twl4030_rconfig,
+};
 
 #ifndef CONFIG_MACH_FLASHBOARD
 static uint32_t board_keymap[] = {
@@ -1019,6 +1127,7 @@ static struct twl4030_platform_data omap3evm_twldata = {
 #ifndef CONFIG_MACH_FLASHBOARD
 	.vaux3		= &omap3evm_vaux3,
 #endif
+	.power		= &omap3evm_script_data,
 };
 
 #ifdef CONFIG_MACH_FLASHBOARD
@@ -1422,6 +1531,27 @@ static struct omap_musb_board_data musb_board_data = {
 	.power			= 100,
 };
 
+/**
+ * Board specific initialization of PM components
+ */
+static void __init omap3_evm_pm_init(void)
+{
+	/* Use sys_offmode signal */
+	omap_pm_sys_offmode_select(1);
+
+	/* sys_clkreq - active high */
+	omap_pm_sys_clkreq_pol(1);
+
+	/* sys_offmode - active low */
+	omap_pm_sys_offmode_pol(0);
+
+	/* Automatically send OFF command */
+	omap_pm_auto_off(1);
+
+	/* Automatically send RET command */
+	omap_pm_auto_ret(1);
+}
+
 static void __init omap3_evm_init(void)
 {
 	omap3_evm_get_revision();
@@ -1492,6 +1622,9 @@ static void __init omap3_evm_init(void)
 #ifdef CONFIG_USB_ANDROID
 	omap3evm_android_gadget_init();
 #endif
+
+	omap3_evm_pm_init();
+
 	/* NAND */
 	board_nand_init(omap3_evm_nand_partitions,
 			ARRAY_SIZE(omap3_evm_nand_partitions),
